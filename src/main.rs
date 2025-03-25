@@ -4,18 +4,14 @@
 #![no_std]
 #![no_main]
 
+use utils::u8_to_decimal_str;
 use waveshare_rp2040_zero as bsp;
 
 use bsp::entry;
-use core::iter::once;
-use defmt::*;
-use defmt_rtt as _;
-use embedded_hal::delay::DelayNs;
-use panic_probe as _;
-use smart_leds::{brightness, SmartLedsWrite, RGB8};
-use waveshare_rp2040_zero::{
+use bsp::{
     hal::{
         clocks::{init_clocks_and_plls, Clock},
+        gpio::{FunctionI2C, Pin},
         pac,
         pio::PIOExt,
         timer::Timer,
@@ -24,7 +20,23 @@ use waveshare_rp2040_zero::{
     },
     Pins, XOSC_CRYSTAL_FREQ,
 };
+use core::iter::once;
+use defmt_rtt as _;
+use embedded_hal::delay::DelayNs;
+use panic_probe as _;
+use smart_leds::{brightness, SmartLedsWrite, RGB8};
 use ws2812_pio::Ws2812;
+
+use bsp::hal::fugit::RateExtU32;
+use embedded_graphics::{
+    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::Text, // Text is here now
+};
+use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
+
+mod utils;
 
 #[entry]
 fn main() -> ! {
@@ -52,6 +64,25 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    // Configure two pins as being I²C, not GPIO
+    let sda_pin: Pin<_, FunctionI2C, _> = pins.gp0.reconfigure();
+    let scl_pin: Pin<_, FunctionI2C, _> = pins.gp1.reconfigure();
+
+    // Create the I²C drive, using the two pre-configured pins.
+    let i2c = bsp::hal::I2C::i2c0(
+        pac.I2C0,
+        sda_pin,
+        scl_pin,
+        400.kHz(),
+        &mut pac.RESETS,
+        &clocks.system_clock,
+    );
+
+    let interface = I2CDisplayInterface::new(i2c);
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate180)
+        .into_buffered_graphics_mode();
+    display.init().unwrap();
+
     let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
     // Configure the addressable LED
@@ -65,13 +96,27 @@ fn main() -> ! {
         timer.count_down(),
     );
 
+    // Build a text style
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_6X10)
+        .text_color(BinaryColor::On)
+        .build();
+
     // Infinite colour wheel loop
     let mut n: u8 = 128;
     let mut timer = timer; // rebind to force a copy of the timer
     loop {
         ws.write(brightness(once(wheel(n)), 122)).unwrap();
-        n = n.wrapping_add(1);
+        let mut buffer = [0u8; 3]; // Enough room for up to three digits
+        let n_str = u8_to_decimal_str(n, &mut buffer);
 
+        display.clear(BinaryColor::Off).unwrap();
+        Text::new(n_str, Point::new(32, 32), style)
+            .draw(&mut display)
+            .unwrap();
+        display.flush().unwrap();
+
+        n = n.wrapping_add(1);
         timer.delay_ms(25);
     }
 }
