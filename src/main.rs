@@ -24,7 +24,7 @@ use core::iter::once;
 use defmt_rtt as _;
 use embedded_hal::delay::DelayNs;
 use panic_probe as _;
-use smart_leds::{brightness, SmartLedsWrite, RGB8};
+use smart_leds::{brightness, SmartLedsWrite};
 use ws2812_pio::Ws2812;
 
 use bsp::hal::fugit::RateExtU32;
@@ -36,6 +36,9 @@ use embedded_graphics::{
 };
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
+use rotary_encoder_hal::{Direction, Rotary};
+
+mod neopixel;
 mod utils;
 
 #[entry]
@@ -67,6 +70,11 @@ fn main() -> ! {
     // Configure two pins as being I²C, not GPIO
     let sda_pin: Pin<_, FunctionI2C, _> = pins.gp0.reconfigure();
     let scl_pin: Pin<_, FunctionI2C, _> = pins.gp1.reconfigure();
+
+    let rot_a_pin = pins.gp2.into_pull_up_input();
+    let rot_b_pin = pins.gp3.into_pull_up_input();
+
+    let mut enc = Rotary::new(rot_a_pin, rot_b_pin);
 
     // Create the I²C drive, using the two pre-configured pins.
     let i2c = bsp::hal::I2C::i2c0(
@@ -105,37 +113,32 @@ fn main() -> ! {
     // Infinite colour wheel loop
     let mut n: u8 = 128;
     let mut timer = timer; // rebind to force a copy of the timer
+
     loop {
-        ws.write(brightness(once(wheel(n)), 122)).unwrap();
-        let mut buffer = [0u8; 3]; // Enough room for up to three digits
-        let n_str = u8_to_decimal_str(n, &mut buffer);
+        if let Ok(direction) = enc.update() {
+            if direction != Direction::None {
+                if direction == Direction::Clockwise {
+                    n = n.wrapping_add(1);
+                } else {
+                    n = n.wrapping_sub(1);
+                }
 
-        display.clear(BinaryColor::Off).unwrap();
-        Text::new(n_str, Point::new(32, 32), style)
-            .draw(&mut display)
-            .unwrap();
-        display.flush().unwrap();
+                // Avoid microsteps
+                if n % 4 == 0 {
+                    // Write valuet to the neopixel
+                    ws.write(brightness(once(neopixel::wheel(n)), 122)).unwrap();
 
-        n = n.wrapping_add(1);
-        timer.delay_ms(25);
-    }
-}
-
-/// Convert a number from `0..=255` to an RGB color triplet.
-///
-/// The colours are a transition from red, to green, to blue and back to red.
-fn wheel(mut wheel_pos: u8) -> RGB8 {
-    wheel_pos = 255 - wheel_pos;
-    if wheel_pos < 85 {
-        // No green in this sector - red and blue only
-        (255 - (wheel_pos * 3), 0, wheel_pos * 3).into()
-    } else if wheel_pos < 170 {
-        // No red in this sector - green and blue only
-        wheel_pos -= 85;
-        (0, wheel_pos * 3, 255 - (wheel_pos * 3)).into()
-    } else {
-        // No blue in this sector - red and green only
-        wheel_pos -= 170;
-        (wheel_pos * 3, 255 - (wheel_pos * 3), 0).into()
+                    // Show number in the screen
+                    let mut buffer = [0u8; 3];
+                    let n_str = u8_to_decimal_str(n, &mut buffer);
+                    display.clear(BinaryColor::Off).unwrap();
+                    Text::new(n_str, Point::new(32, 32), style)
+                        .draw(&mut display)
+                        .unwrap();
+                    display.flush().unwrap();
+                }
+            }
+        }
+        timer.delay_ms(1);
     }
 }
